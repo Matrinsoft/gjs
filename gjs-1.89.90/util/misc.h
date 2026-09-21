@@ -1,0 +1,120 @@
+/* -*- mode: C++; c-basic-offset: 4; indent-tabs-mode: nil; -*- */
+// SPDX-License-Identifier: MIT OR LGPL-2.0-or-later
+// SPDX-FileCopyrightText: 2008 litl, LLC
+
+#pragma once
+
+#include <config.h>
+
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>  // for FILE, stdout
+#include <string.h>  // for memcpy
+
+#include <charconv>
+#include <chrono>
+#include <ratio>  // for micro
+#include <string>
+
+#include <glib.h>  // for g_get_monotonic_time, g_assert
+
+#include <mozilla/Result.h>
+#include <mozilla/ResultVariant.h>  // IWYU pragma: keep
+
+#ifdef G_DISABLE_ASSERT
+#    define GJS_USED_ASSERT [[maybe_unused]]
+#else
+#    define GJS_USED_ASSERT
+#endif
+
+// GJS_ALWAYS_TRUE(expr) and friends always evaluate the provided expression,
+// regardless of whether asserts are disabled, but only assert if asserts are
+// enabled. Based on MOZ_ALWAYS_TRUE.
+#define GJS_ALWAYS_TRUE(expr)                                          \
+    do {                                                               \
+        if (G_LIKELY(expr)) {                                          \
+            /* Silence [[nodiscard]]. */                               \
+        } else {                                                       \
+            g_assertion_message_expr(G_LOG_DOMAIN, __FILE__, __LINE__, \
+                                     G_STRFUNC, #expr);                \
+        }                                                              \
+    } while (false)
+
+#define GJS_ALWAYS_OK(expr) GJS_ALWAYS_TRUE((expr).isOk())
+
+bool gjs_environment_variable_is_set(const char* env_variable_name);
+
+/**
+ * LogFile:
+ *
+ * RAII class encapsulating access to a FILE* pointer that must be closed,
+ * unless it is an already-open fallback file such as stdout or stderr.
+ */
+class LogFile {
+    FILE* m_fp;
+    const char* m_errmsg = nullptr;
+    bool m_should_close : 1;
+
+ public:
+    LogFile(const LogFile&) = delete;
+    LogFile& operator=(const LogFile&) = delete;
+
+    explicit LogFile(const char* filename, FILE* fallback_fp = stdout)
+        : m_should_close(false) {
+        if (filename) {
+            m_fp = fopen(filename, "a");
+            if (!m_fp)
+                m_errmsg = strerror(errno);
+            else
+                m_should_close = true;
+        } else {
+            m_fp = fallback_fp;
+        }
+    }
+
+    ~LogFile() {
+        if (m_should_close)
+            fclose(m_fp);
+    }
+
+    FILE* fp() { return m_fp; }
+    bool has_error() { return !!m_errmsg; }
+    const char* errmsg() { return m_errmsg; }
+};
+
+namespace Gjs {
+
+class StatmParseError {
+    std::string m_message;
+
+ public:
+    // NOLINTNEXTLINE(runtime/explicit) - explicit ctor won't work with Err()
+    StatmParseError(const char* message) : m_message(message) {}
+    StatmParseError(const char* message, std::from_chars_result result);
+
+    explicit operator std::string() const { return m_message; }
+};
+
+using StatmParseResult = mozilla::Result<uint64_t, StatmParseError>;
+
+StatmParseResult parse_statm_file_rss(const char* file_contents);
+
+}  // namespace Gjs
+
+namespace GLib {
+
+// GLib monotonic clock interface for std::chrono
+struct MonotonicClock {
+    using rep = int64_t;
+    using period = std::micro;
+    using duration = std::chrono::microseconds;
+    using time_point = std::chrono::time_point<MonotonicClock>;
+    static constexpr const bool is_steady = true;
+    [[nodiscard]]
+    static time_point now() {
+        return time_point{duration{g_get_monotonic_time()}};
+    }
+};
+using MonotonicTime = MonotonicClock::time_point;
+
+}  // namespace GLib

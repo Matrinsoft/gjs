@@ -1,0 +1,1050 @@
+/* -*- mode: C++; c-basic-offset: 4; indent-tabs-mode: nil; -*- */
+// SPDX-License-Identifier: MIT OR LGPL-2.0-or-later
+// SPDX-FileCopyrightText: 2010 litl, LLC.
+
+#include <config.h>
+
+#include <stddef.h>  // for size_t
+#include <stdint.h>
+
+#include <memory>
+#include <string>
+
+#include <cairo.h>
+#include <girepository/girepository.h>
+#include <glib.h>  // for g_assert
+
+#include <js/Array.h>  // for JS::NewArrayObject
+#include <js/CallArgs.h>
+#include <js/Conversions.h>
+#include <js/MemoryFunctions.h>  // for RemoveAssociatedMemory
+#include <js/Object.h>           // for GetReservedSlot, SetReservedSlot
+#include <js/PropertyAndElement.h>
+#include <js/PropertyDescriptor.h>  // for JSPROP_READONLY
+#include <js/PropertySpec.h>
+#include <js/RootingAPI.h>
+#include <js/TypeDecls.h>
+#include <js/Utility.h>  // for UniqueChars
+#include <js/Value.h>
+#include <jsapi.h>  // for JS_NewPlainObject
+
+#include "gi/arg-inl.h"
+#include "gi/arg.h"
+#include "gi/foreign.h"
+#include "gjs/enum-utils.h"
+#include "gjs/jsapi-util-args.h"
+#include "gjs/jsapi-util.h"
+#include "gjs/macros.h"
+#include "gjs/mem-private.h"
+#include "modules/cairo-memory.h"
+#include "modules/cairo-private.h"
+
+#define GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj) \
+    GJS_GET_THIS(cx, argc, vp, argv, obj);                             \
+    cairo_t* cr;                                                       \
+    if (!CairoContext::for_js_typecheck(cx, obj, &cr, &(argv)))        \
+        return false;                                                  \
+    if (!cr)                                                           \
+        return true;
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(mname)                          \
+    GJS_JSAPI_RETURN_CONVENTION                                             \
+    static bool mname##_func(JSContext* cx, unsigned argc, JS::Value* vp) { \
+        GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj)
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC_END                           \
+    return gjs_cairo_check_status(cx, cairo_status(cr), "context"); \
+    }
+
+#define GJS_CAIRO_CONTEXT_CHECK_NO_ARGS(m)                    \
+    if (argc > 0) {                                           \
+        gjs_throw(cx, "Context." #m "() takes no arguments"); \
+        return false;                                         \
+    }
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC0(method, cfunc) \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)       \
+    cfunc(cr);                                        \
+    argv.rval().setUndefined();                       \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC0I(method, cfunc) \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)        \
+    int ret;                                           \
+    GJS_CAIRO_CONTEXT_CHECK_NO_ARGS(method)            \
+    ret = static_cast<int>(cfunc(cr));                 \
+    argv.rval().setInt32(ret);                         \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC0B(method, cfunc) \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)        \
+    GJS_CAIRO_CONTEXT_CHECK_NO_ARGS(method)            \
+    cairo_bool_t ret = cfunc(cr);                      \
+    argv.rval().setBoolean(ret);                       \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC2FFAFF(method, cfunc, n1, n2)             \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                                \
+    double arg1, arg2;                                                         \
+    if (!gjs_parse_call_args(cx, #method, argv, "ff", #n1, &arg1, #n2, &arg2)) \
+        return false;                                                          \
+    cfunc(cr, &arg1, &arg2);                                                   \
+    if (cairo_status(cr) == CAIRO_STATUS_SUCCESS) {                            \
+        JS::RootedObject array{cx, JS::NewArrayObject(cx, 2)};                 \
+        if (!array)                                                            \
+            return false;                                                      \
+        JS::RootedValue r{cx, JS::NumberValue(JS::CanonicalizeNaN(arg1))};     \
+        if (!JS_SetElement(cx, array, 0, r))                                   \
+            return false;                                                      \
+        r.setNumber(JS::CanonicalizeNaN(arg2));                                \
+        if (!JS_SetElement(cx, array, 1, r))                                   \
+            return false;                                                      \
+        argv.rval().setObject(*array);                                         \
+    }                                                                          \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC0AFF(method, cfunc)                  \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                           \
+    double arg1, arg2;                                                     \
+    GJS_CAIRO_CONTEXT_CHECK_NO_ARGS(method)                               \
+    cfunc(cr, &arg1, &arg2);                                               \
+    if (cairo_status(cr) == CAIRO_STATUS_SUCCESS) {                        \
+        JS::RootedObject array{cx, JS::NewArrayObject(cx, 2)};             \
+        if (!array)                                                        \
+            return false;                                                  \
+        JS::RootedValue r{cx, JS::NumberValue(JS::CanonicalizeNaN(arg1))}; \
+        if (!JS_SetElement(cx, array, 0, r))                               \
+            return false;                                                  \
+        r.setNumber(JS::CanonicalizeNaN(arg2));                            \
+        if (!JS_SetElement(cx, array, 1, r))                               \
+            return false;                                                  \
+        argv.rval().setObject(*array);                                     \
+    }                                                                      \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC0AFFFF(method, cfunc)                \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                           \
+    double arg1, arg2, arg3, arg4;                                         \
+    GJS_CAIRO_CONTEXT_CHECK_NO_ARGS(method)                               \
+    cfunc(cr, &arg1, &arg2, &arg3, &arg4);                                 \
+    {                                                                      \
+        JS::RootedObject array{cx, JS::NewArrayObject(cx, 4)};             \
+        if (!array)                                                        \
+            return false;                                                  \
+        JS::RootedValue r{cx, JS::NumberValue(JS::CanonicalizeNaN(arg1))}; \
+        if (!JS_SetElement(cx, array, 0, r))                               \
+            return false;                                                  \
+        r.setNumber(JS::CanonicalizeNaN(arg2));                            \
+        if (!JS_SetElement(cx, array, 1, r))                               \
+            return false;                                                  \
+        r.setNumber(JS::CanonicalizeNaN(arg3));                            \
+        if (!JS_SetElement(cx, array, 2, r))                               \
+            return false;                                                  \
+        r.setNumber(JS::CanonicalizeNaN(arg4));                            \
+        if (!JS_SetElement(cx, array, 3, r))                               \
+            return false;                                                  \
+        argv.rval().setObject(*array);                                     \
+    }                                                                      \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC0F(method, cfunc) \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)        \
+    GJS_CAIRO_CONTEXT_CHECK_NO_ARGS(method)            \
+    double ret = cfunc(cr);                            \
+    argv.rval().setNumber(JS::CanonicalizeNaN(ret));   \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC1(method, cfunc, fmt, t1, n1) \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                    \
+    t1 arg1;                                                       \
+    if (!gjs_parse_call_args(cx, #method, argv, fmt, #n1, &arg1))  \
+        return false;                                              \
+    cfunc(cr, arg1);                                               \
+    argv.rval().setUndefined();                                    \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC2(method, cfunc, fmt, t1, n1, t2, n2)    \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                               \
+    t1 arg1;                                                                  \
+    t2 arg2;                                                                  \
+    if (!gjs_parse_call_args(cx, #method, argv, fmt, #n1, &arg1, #n2, &arg2)) \
+        return false;                                                         \
+    cfunc(cr, arg1, arg2);                                                    \
+    argv.rval().setUndefined();                                               \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC2B(method, cfunc, fmt, t1, n1, t2, n2)   \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                               \
+    t1 arg1;                                                                  \
+    t2 arg2;                                                                  \
+    if (!gjs_parse_call_args(cx, #method, argv, fmt, #n1, &arg1, #n2, &arg2)) \
+        return false;                                                         \
+    cairo_bool_t ret = cfunc(cr, arg1, arg2);                                 \
+    argv.rval().setBoolean(ret);                                              \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC3(method, cfunc, fmt, t1, n1, t2, n2, t3, \
+                                       n3)                                     \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                                \
+    t1 arg1;                                                                   \
+    t2 arg2;                                                                   \
+    t3 arg3;                                                                   \
+    if (!gjs_parse_call_args(cx, #method, argv, fmt, #n1, &arg1, #n2, &arg2,   \
+                             #n3, &arg3))                                      \
+        return false;                                                          \
+    cfunc(cr, arg1, arg2, arg3);                                               \
+    argv.rval().setUndefined();                                                \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC4(method, cfunc, fmt, t1, n1, t2, n2, t3, \
+                                       n3, t4, n4)                             \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                                \
+    t1 arg1;                                                                   \
+    t2 arg2;                                                                   \
+    t3 arg3;                                                                   \
+    t4 arg4;                                                                   \
+    if (!gjs_parse_call_args(cx, #method, argv, fmt, #n1, &arg1, #n2, &arg2,   \
+                             #n3, &arg3, #n4, &arg4))                          \
+        return false;                                                          \
+    cfunc(cr, arg1, arg2, arg3, arg4);                                         \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC5(method, cfunc, fmt, t1, n1, t2, n2, t3, \
+                                       n3, t4, n4, t5, n5)                     \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                                \
+    t1 arg1;                                                                   \
+    t2 arg2;                                                                   \
+    t3 arg3;                                                                   \
+    t4 arg4;                                                                   \
+    t5 arg5;                                                                   \
+    if (!gjs_parse_call_args(cx, #method, argv, fmt, #n1, &arg1, #n2, &arg2,   \
+                             #n3, &arg3, #n4, &arg4, #n5, &arg5))              \
+        return false;                                                          \
+    cfunc(cr, arg1, arg2, arg3, arg4, arg5);                                   \
+    argv.rval().setUndefined();                                                \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+#define GJS_CAIRO_CONTEXT_DEFINE_FUNC6(method, cfunc, fmt, t1, n1, t2, n2, t3, \
+                                       n3, t4, n4, t5, n5, t6, n6)             \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_BEGIN(method)                                \
+    t1 arg1;                                                                   \
+    t2 arg2;                                                                   \
+    t3 arg3;                                                                   \
+    t4 arg4;                                                                   \
+    t5 arg5;                                                                   \
+    t6 arg6;                                                                   \
+    if (!gjs_parse_call_args(cx, #method, argv, fmt, #n1, &arg1, #n2, &arg2,   \
+                             #n3, &arg3, #n4, &arg4, #n5, &arg5, #n6, &arg6))  \
+        return false;                                                          \
+    cfunc(cr, arg1, arg2, arg3, arg4, arg5, arg6);                             \
+    argv.rval().setUndefined();                                                \
+    GJS_CAIRO_CONTEXT_DEFINE_FUNC_END
+
+void CairoContext::add_associated_memory(JSObject* obj, cairo_t* cr) {
+    size_t memory_size =
+        add_associated_memory_for_surface(obj, cairo_get_target(cr));
+    JS::SetReservedSlot(obj, MEMORY_SIZE, JS::Int32Value(memory_size));
+}
+
+void CairoContext::remove_associated_memory(JSObject* obj, cairo_t* cr) {
+    if (!cr)
+        return;
+
+    JS::Value memory_size_value = JS::GetReservedSlot(obj, MEMORY_SIZE);
+    g_assert(memory_size_value.isInt32());
+    int32_t memory_size = memory_size_value.toInt32();
+    if (memory_size > 0) {
+        JS::RemoveAssociatedMemory(obj, memory_size, MemoryUse::Cairo);
+        JS::SetReservedSlot(obj, MEMORY_SIZE, JS::Int32Value(0));
+    }
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+cairo_t* CairoContext::constructor_impl(JSContext* cx,
+                                        const JS::CallArgs& args) {
+    JS::RootedObject surface_wrapper{cx};
+    if (!gjs_parse_call_args(cx, "Context", args, "o", "surface",
+                             &surface_wrapper))
+        return nullptr;
+
+    cairo_surface_t* surface = CairoSurface::for_js(cx, surface_wrapper);
+    if (!surface)
+        return nullptr;
+
+    cairo_t* cr = cairo_create(surface);
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return nullptr;
+
+    return cr;
+}
+
+void CairoContext::finalize_impl(JS::GCContext*, cairo_t* cr) {
+    if (!cr)
+        return;
+    cairo_destroy(cr);
+}
+
+// Properties
+
+// clang-format off
+const JSPropertySpec CairoContext::proto_props[] = {
+    JS_STRING_SYM_PS(toStringTag, "Context", JSPROP_READONLY),
+    JS_PS_END};
+// clang-format on
+
+// Methods
+
+GJS_CAIRO_CONTEXT_DEFINE_FUNC5(arc, cairo_arc, "fffff", double, xc, double, yc,
+                               double, radius, double, angle1, double, angle2)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC5(arcNegative, cairo_arc_negative, "fffff", double,
+                               xc, double, yc, double, radius, double, angle1,
+                               double, angle2)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC6(curveTo, cairo_curve_to, "ffffff", double, x1,
+                               double, y1, double, x2, double, y2, double, x3,
+                               double, y3)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(clip, cairo_clip)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(clipPreserve, cairo_clip_preserve)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0AFFFF(clipExtents, cairo_clip_extents)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(closePath, cairo_close_path)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(copyPage, cairo_copy_page)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2FFAFF(deviceToUser, cairo_device_to_user, "x",
+                                    "y")
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2FFAFF(deviceToUserDistance,
+                                    cairo_device_to_user_distance, "x", "y")
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(fill, cairo_fill)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(fillPreserve, cairo_fill_preserve)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0AFFFF(fillExtents, cairo_fill_extents)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0I(getAntialias, cairo_get_antialias)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0AFF(getCurrentPoint, cairo_get_current_point)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0I(getDashCount, cairo_get_dash_count)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0I(getFillRule, cairo_get_fill_rule)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0I(getLineCap, cairo_get_line_cap)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0I(getLineJoin, cairo_get_line_join)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0F(getLineWidth, cairo_get_line_width)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0F(getMiterLimit, cairo_get_miter_limit)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0I(getOperator, cairo_get_operator)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0F(getTolerance, cairo_get_tolerance)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0B(hasCurrentPoint, cairo_has_current_point)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(identityMatrix, cairo_identity_matrix)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2B(inFill, cairo_in_fill, "ff", double, x, double,
+                                y)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2B(inStroke, cairo_in_stroke, "ff", double, x,
+                                double, y)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2(lineTo, cairo_line_to, "ff", double, x, double,
+                               y)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2(moveTo, cairo_move_to, "ff", double, x, double,
+                               y)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(newPath, cairo_new_path)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(newSubPath, cairo_new_sub_path)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(paint, cairo_paint)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(paintWithAlpha, cairo_paint_with_alpha, "f",
+                               double, alpha)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0AFFFF(pathExtents, cairo_path_extents)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(pushGroup, cairo_push_group)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(pushGroupWithContent,
+                               cairo_push_group_with_content, "i",
+                               cairo_content_t, content)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(popGroupToSource, cairo_pop_group_to_source)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC4(rectangle, cairo_rectangle, "ffff", double, x,
+                               double, y, double, width, double, height)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC6(relCurveTo, cairo_rel_curve_to, "ffffff", double,
+                               dx1, double, dy1, double, dx2, double, dy2,
+                               double, dx3, double, dy3)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2(relLineTo, cairo_rel_line_to, "ff", double, dx,
+                               double, dy)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2(relMoveTo, cairo_rel_move_to, "ff", double, dx,
+                               double, dy)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(resetClip, cairo_reset_clip)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(restore, cairo_restore)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(rotate, cairo_rotate, "f", double, angle)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(save, cairo_save)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2(scale, cairo_scale, "ff", double, sx, double, sy)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setAntialias, cairo_set_antialias, "i",
+                               cairo_antialias_t, antialias)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setFillRule, cairo_set_fill_rule, "i",
+                               cairo_fill_rule_t, fill_rule)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setFontSize, cairo_set_font_size, "f", double,
+                               size)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setLineCap, cairo_set_line_cap, "i",
+                               cairo_line_cap_t, line_cap)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setLineJoin, cairo_set_line_join, "i",
+                               cairo_line_join_t, line_join)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setLineWidth, cairo_set_line_width, "f", double,
+                               width)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setMiterLimit, cairo_set_miter_limit, "f",
+                               double, limit)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setOperator, cairo_set_operator, "i",
+                               cairo_operator_t, op)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC1(setTolerance, cairo_set_tolerance, "f", double,
+                               tolerance)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC3(setSourceRGB, cairo_set_source_rgb, "fff",
+                               double, red, double, green, double, blue)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC4(setSourceRGBA, cairo_set_source_rgba, "ffff",
+                               double, red, double, green, double, blue, double,
+                               alpha)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(showPage, cairo_show_page)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(stroke, cairo_stroke)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0(strokePreserve, cairo_stroke_preserve)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC0AFFFF(strokeExtents, cairo_stroke_extents)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2(translate, cairo_translate, "ff", double, tx,
+                               double, ty)
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2FFAFF(userToDevice, cairo_user_to_device, "x",
+                                    "y")
+GJS_CAIRO_CONTEXT_DEFINE_FUNC2FFAFF(userToDeviceDistance,
+                                    cairo_user_to_device_distance, "x", "y")
+
+bool CairoContext::dispose(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, rec, obj);
+
+    CairoContext::remove_associated_memory(obj, cr);
+    cairo_destroy(cr);
+    CairoContext::unset_private(obj);
+
+    rec.rval().setUndefined();
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool appendPath_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::RootedObject path_wrapper{cx};
+
+    if (!gjs_parse_call_args(cx, "path", argv, "o", "path", &path_wrapper))
+        return false;
+
+    cairo_path_t* path;
+    if (!CairoPath::for_js_typecheck(cx, path_wrapper, &path, &argv))
+        return false;
+
+    cairo_append_path(cr, path);
+    argv.rval().setUndefined();
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool copyPath_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    if (!gjs_parse_call_args(cx, "", argv, ""))
+        return false;
+
+    cairo_path_t* path = cairo_copy_path(cr);
+    JSObject* retval = CairoPath::take_c_ptr(cx, path);
+    if (!retval)
+        return false;
+
+    argv.rval().setObject(*retval);
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool copyPathFlat_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    if (!gjs_parse_call_args(cx, "", argv, ""))
+        return false;
+
+    cairo_path_t* path = cairo_copy_path_flat(cr);
+    JSObject* retval = CairoPath::take_c_ptr(cx, path);
+    if (!retval)
+        return false;
+
+    argv.rval().setObject(*retval);
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool mask_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::RootedObject pattern_wrapper{cx};
+
+    if (!gjs_parse_call_args(cx, "mask", argv, "o", "pattern",
+                             &pattern_wrapper))
+        return false;
+
+    cairo_pattern_t* pattern = CairoPattern::for_js(cx, pattern_wrapper);
+    if (!pattern)
+        return false;
+
+    cairo_mask(cr, pattern);
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    argv.rval().setUndefined();
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool maskSurface_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::RootedObject surface_wrapper{cx};
+    double x, y;
+
+    if (!gjs_parse_call_args(cx, "maskSurface", argv, "off", "surface",
+                             &surface_wrapper, "x", &x, "y", &y))
+        return false;
+
+    cairo_surface_t* surface = CairoSurface::for_js(cx, surface_wrapper);
+    if (!surface)
+        return false;
+
+    cairo_mask_surface(cr, surface, x, y);
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    argv.rval().setUndefined();
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool setDash_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::RootedObject dashes{cx};
+    double offset;
+    bool is_array;
+
+    if (!gjs_parse_call_args(cx, "setDash", argv, "of", "dashes", &dashes,
+                             "offset", &offset))
+        return false;
+
+    if (!JS::IsArrayObject(cx, dashes, &is_array))
+        return false;
+    if (!is_array) {
+        gjs_throw(cx, "dashes must be an array");
+        return false;
+    }
+
+    uint32_t len;
+    if (!JS::GetArrayLength(cx, dashes, &len)) {
+        gjs_throw(cx, "Can't get length of dashes");
+        return false;
+    }
+
+    std::unique_ptr<double[]> dashes_c = std::make_unique<double[]>(len);
+    size_t dashes_c_size = 0;
+    JS::RootedValue elem{cx};
+    for (uint32_t i = 0; i < len; ++i) {
+        double b;
+
+        elem.setUndefined();
+        if (!JS_GetElement(cx, dashes, i, &elem)) {
+            return false;
+        }
+        if (elem.isUndefined())
+            continue;
+
+        if (!JS::ToNumber(cx, elem, &b))
+            return false;
+        if (b <= 0) {
+            gjs_throw(cx, "Dash value must be positive");
+            return false;
+        }
+
+        dashes_c[dashes_c_size++] = b;
+    }
+
+    cairo_set_dash(cr, dashes_c.get(), dashes_c_size, offset);
+    argv.rval().setUndefined();
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool setSource_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::RootedObject pattern_wrapper{cx};
+
+    if (!gjs_parse_call_args(cx, "setSource", argv, "o", "pattern",
+                             &pattern_wrapper))
+        return false;
+
+    cairo_pattern_t* pattern = CairoPattern::for_js(cx, pattern_wrapper);
+    if (!pattern)
+        return false;
+
+    cairo_set_source(cr, pattern);
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    argv.rval().setUndefined();
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool setSourceSurface_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::RootedObject surface_wrapper{cx};
+    double x, y;
+
+    if (!gjs_parse_call_args(cx, "setSourceSurface", argv, "off", "surface",
+                             &surface_wrapper, "x", &x, "y", &y))
+        return false;
+
+    cairo_surface_t* surface = CairoSurface::for_js(cx, surface_wrapper);
+    if (!surface)
+        return false;
+
+    cairo_set_source_surface(cr, surface, x, y);
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    argv.rval().setUndefined();
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool showText_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::UniqueChars utf8;
+
+    if (!gjs_parse_call_args(cx, "showText", argv, "s", "utf8", &utf8))
+        return false;
+
+    cairo_show_text(cr, utf8.get());
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    argv.rval().setUndefined();
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool textPath_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::UniqueChars utf8;
+
+    if (!gjs_parse_call_args(cx, "textPath", argv, "s", "utf8", &utf8))
+        return false;
+
+    cairo_text_path(cr, utf8.get());
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    argv.rval().setUndefined();
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool selectFontFace_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::UniqueChars family;
+    cairo_font_slant_t slant;
+    cairo_font_weight_t weight;
+
+    if (!gjs_parse_call_args(cx, "selectFontFace", argv, "sii", "family",
+                             &family, "slant", &slant, "weight", &weight))
+        return false;
+
+    cairo_select_font_face(cr, family.get(), slant, weight);
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+    argv.rval().setUndefined();
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool popGroup_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, rec, obj);
+
+    if (argc > 0) {
+        gjs_throw(cx, "Context.popGroup() takes no arguments");
+        return false;
+    }
+
+    cairo_pattern_t* pattern = cairo_pop_group(cr);
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    JSObject* pattern_wrapper = gjs_cairo_pattern_from_pattern(cx, pattern);
+    cairo_pattern_destroy(pattern);
+    if (!pattern_wrapper) {
+        gjs_throw(cx, "failed to create pattern");
+        return false;
+    }
+
+    rec.rval().setObject(*pattern_wrapper);
+
+    return true;
+}
+GJS_JSAPI_RETURN_CONVENTION
+static bool getSource_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, rec, obj);
+
+    if (argc > 0) {
+        gjs_throw(cx, "Context.getSource() takes no arguments");
+        return false;
+    }
+
+    cairo_pattern_t* pattern = cairo_get_source(cr);
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    // pattern belongs to the context, so keep the reference
+    JSObject* pattern_wrapper = gjs_cairo_pattern_from_pattern(cx, pattern);
+    if (!pattern_wrapper) {
+        gjs_throw(cx, "failed to create pattern");
+        return false;
+    }
+
+    rec.rval().setObject(*pattern_wrapper);
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool getTarget_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, rec, obj);
+
+    if (argc > 0) {
+        gjs_throw(cx, "Context.getTarget() takes no arguments");
+        return false;
+    }
+
+    cairo_surface_t* surface = cairo_get_target(cr);
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    // surface belongs to the context, so keep the reference
+    JSObject* surface_wrapper = CairoSurface::from_c_ptr(cx, surface);
+    if (!surface_wrapper) {
+        // exception already set
+        return false;
+    }
+
+    rec.rval().setObject(*surface_wrapper);
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool getGroupTarget_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, rec, obj);
+
+    if (argc > 0) {
+        gjs_throw(cx, "Context.getGroupTarget() takes no arguments");
+        return false;
+    }
+
+    cairo_surface_t* surface = cairo_get_group_target(cr);
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    // surface belongs to the context, so keep the reference
+    JSObject* surface_wrapper = CairoSurface::from_c_ptr(cx, surface);
+    if (!surface_wrapper) {
+        // exception already set
+        return false;
+    }
+
+    rec.rval().setObject(*surface_wrapper);
+
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool textExtents_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, args, this_obj);
+
+    JS::UniqueChars utf8;
+    if (!gjs_parse_call_args(cx, "textExtents", args, "s", "utf8", &utf8))
+        return false;
+
+    cairo_text_extents_t extents;
+    cairo_text_extents(cr, utf8.get(), &extents);
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    JS::RootedObject extents_obj(cx, JS_NewPlainObject(cx));
+    if (!extents_obj)
+        return false;
+
+    JSPropertySpec properties[] = {
+        JS_DOUBLE_PS("xBearing", extents.x_bearing, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("yBearing", extents.y_bearing, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("width", extents.width, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("height", extents.height, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("xAdvance", extents.x_advance, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("yAdvance", extents.y_advance, JSPROP_ENUMERATE),
+        JS_PS_END};
+
+    if (!JS_DefineProperties(cx, extents_obj, properties))
+        return false;
+
+    args.rval().setObject(*extents_obj);
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool fontExtents_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, args, this_obj);
+
+    cairo_font_extents_t extents;
+    cairo_font_extents(cr, &extents);
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    JS::RootedObject extents_obj{cx, JS_NewPlainObject(cx)};
+    if (!extents_obj)
+        return false;
+
+    JSPropertySpec properties[] = {
+        JS_DOUBLE_PS("ascent", extents.ascent, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("descent", extents.descent, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("height", extents.height, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("maxXAdvance", extents.max_x_advance, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("maxYAdvance", extents.max_y_advance, JSPROP_ENUMERATE),
+        JS_PS_END};
+
+    if (!JS_DefineProperties(cx, extents_obj, properties))
+        return false;
+
+    args.rval().setObject(*extents_obj);
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool getFontMatrix_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, args, this_obj);
+
+    cairo_matrix_t matrix;
+    cairo_get_font_matrix(cr, &matrix);
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    JS::RootedObject matrix_obj{cx, JS_NewPlainObject(cx)};
+    if (!matrix_obj)
+        return false;
+
+    JSPropertySpec properties[] = {
+        JS_DOUBLE_PS("xx", matrix.xx, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("yx", matrix.yx, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("xy", matrix.xy, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("yy", matrix.yy, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("x0", matrix.x0, JSPROP_ENUMERATE),
+        JS_DOUBLE_PS("y0", matrix.y0, JSPROP_ENUMERATE),
+        JS_PS_END};
+
+    if (!JS_DefineProperties(cx, matrix_obj, properties))
+        return false;
+
+    args.rval().setObject(*matrix_obj);
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool setFontMatrix_func(JSContext* cx, unsigned argc, JS::Value* vp) {
+    GJS_CAIRO_CONTEXT_GET_PRIV_CR_CHECKED(cx, argc, vp, argv, obj);
+
+    JS::RootedObject matrix_obj{cx};
+    if (!gjs_parse_call_args(cx, "setFontMatrix", argv, "o", "matrix",
+                             &matrix_obj))
+        return false;
+
+    cairo_matrix_t matrix;
+    JS::RootedValue val{cx};
+
+#define GET_MATRIX_FIELD(field)                                  \
+    if (!JS_GetProperty(cx, matrix_obj, #field, &val))           \
+        return false;                                            \
+    if (!JS::ToNumber(cx, val, &matrix.field))                   \
+        return false;
+
+    GET_MATRIX_FIELD(xx)
+    GET_MATRIX_FIELD(yx)
+    GET_MATRIX_FIELD(xy)
+    GET_MATRIX_FIELD(yy)
+    GET_MATRIX_FIELD(x0)
+    GET_MATRIX_FIELD(y0)
+#undef GET_MATRIX_FIELD
+
+    cairo_set_font_matrix(cr, &matrix);
+
+    if (!gjs_cairo_check_status(cx, cairo_status(cr), "context"))
+        return false;
+
+    argv.rval().setUndefined();
+    return true;
+}
+
+// clang-format off
+const JSFunctionSpec CairoContext::proto_funcs[] = {
+    JS_FN("$dispose", &CairoContext::dispose, 0, 0),
+    JS_FN("appendPath", appendPath_func, 0, 0),
+    JS_FN("arc", arc_func, 0, 0),
+    JS_FN("arcNegative", arcNegative_func, 0, 0),
+    JS_FN("clip", clip_func, 0, 0),
+    JS_FN("clipExtents", clipExtents_func, 0, 0),
+    JS_FN("clipPreserve", clipPreserve_func, 0, 0),
+    JS_FN("closePath", closePath_func, 0, 0),
+    JS_FN("copyPage", copyPage_func, 0, 0),
+    JS_FN("copyPath", copyPath_func, 0, 0),
+    JS_FN("copyPathFlat", copyPathFlat_func, 0, 0),
+    JS_FN("curveTo", curveTo_func, 0, 0),
+    JS_FN("deviceToUser", deviceToUser_func, 0, 0),
+    JS_FN("deviceToUserDistance", deviceToUserDistance_func, 0, 0),
+    JS_FN("fill", fill_func, 0, 0),
+    JS_FN("fillPreserve", fillPreserve_func, 0, 0),
+    JS_FN("fillExtents", fillExtents_func, 0, 0),
+    JS_FN("fontExtents", fontExtents_func, 0, 0),
+    JS_FN("getAntialias", getAntialias_func, 0, 0),
+    JS_FN("getCurrentPoint", getCurrentPoint_func, 0, 0),
+    // getDash
+    JS_FN("getDashCount", getDashCount_func, 0, 0),
+    JS_FN("getFillRule", getFillRule_func, 0, 0),
+    // getFontFace
+    JS_FN("getFontMatrix", getFontMatrix_func, 0, 0),
+    // getFontOptions
+    JS_FN("getGroupTarget", getGroupTarget_func, 0, 0),
+    JS_FN("getLineCap", getLineCap_func, 0, 0),
+    JS_FN("getLineJoin", getLineJoin_func, 0, 0),
+    JS_FN("getLineWidth", getLineWidth_func, 0, 0),
+    // getMatrix
+    JS_FN("getMiterLimit", getMiterLimit_func, 0, 0),
+    JS_FN("getOperator", getOperator_func, 0, 0),
+    // getScaledFont
+    JS_FN("getSource", getSource_func, 0, 0),
+    JS_FN("getTarget", getTarget_func, 0, 0),
+    JS_FN("getTolerance", getTolerance_func, 0, 0),
+    // glyphPath
+    // glyphExtents
+    JS_FN("hasCurrentPoint", hasCurrentPoint_func, 0, 0),
+    JS_FN("identityMatrix", identityMatrix_func, 0, 0),
+    JS_FN("inFill", inFill_func, 0, 0),
+    JS_FN("inStroke", inStroke_func, 0, 0),
+    JS_FN("lineTo", lineTo_func, 0, 0),
+    JS_FN("mask", mask_func, 0, 0),
+    JS_FN("maskSurface", maskSurface_func, 0, 0),
+    JS_FN("moveTo", moveTo_func, 0, 0),
+    JS_FN("newPath", newPath_func, 0, 0),
+    JS_FN("newSubPath", newSubPath_func, 0, 0),
+    JS_FN("paint", paint_func, 0, 0),
+    JS_FN("paintWithAlpha", paintWithAlpha_func, 0, 0),
+    JS_FN("pathExtents", pathExtents_func, 0, 0),
+    JS_FN("popGroup", popGroup_func, 0, 0),
+    JS_FN("popGroupToSource", popGroupToSource_func, 0, 0),
+    JS_FN("pushGroup", pushGroup_func, 0, 0),
+    JS_FN("pushGroupWithContent", pushGroupWithContent_func, 0, 0),
+    JS_FN("rectangle", rectangle_func, 0, 0),
+    JS_FN("relCurveTo", relCurveTo_func, 0, 0),
+    JS_FN("relLineTo", relLineTo_func, 0, 0),
+    JS_FN("relMoveTo", relMoveTo_func, 0, 0),
+    JS_FN("resetClip", resetClip_func, 0, 0),
+    JS_FN("restore", restore_func, 0, 0),
+    JS_FN("rotate", rotate_func, 0, 0),
+    JS_FN("save", save_func, 0, 0),
+    JS_FN("scale", scale_func, 0, 0),
+    JS_FN("selectFontFace", selectFontFace_func, 0, 0),
+    JS_FN("setAntialias", setAntialias_func, 0, 0),
+    JS_FN("setDash", setDash_func, 0, 0),
+    // setFontFace
+    JS_FN("setFontMatrix", setFontMatrix_func, 1, 0),
+    // setFontOptions
+    JS_FN("setFontSize", setFontSize_func, 0, 0),
+    JS_FN("setFillRule", setFillRule_func, 0, 0),
+    JS_FN("setLineCap", setLineCap_func, 0, 0),
+    JS_FN("setLineJoin", setLineJoin_func, 0, 0),
+    JS_FN("setLineWidth", setLineWidth_func, 0, 0),
+    // setMatrix
+    JS_FN("setMiterLimit", setMiterLimit_func, 0, 0),
+    JS_FN("setOperator", setOperator_func, 0, 0),
+    // setScaledFont
+    JS_FN("setSource", setSource_func, 0, 0),
+    JS_FN("setSourceRGB", setSourceRGB_func, 0, 0),
+    JS_FN("setSourceRGBA", setSourceRGBA_func, 0, 0),
+    JS_FN("setSourceSurface", setSourceSurface_func, 0, 0),
+    JS_FN("setTolerance", setTolerance_func, 0, 0),
+    // showGlyphs
+    JS_FN("showPage", showPage_func, 0, 0),
+    JS_FN("showText", showText_func, 0, 0),
+    // showTextGlyphs
+    JS_FN("stroke", stroke_func, 0, 0),
+    JS_FN("strokeExtents", strokeExtents_func, 0, 0),
+    JS_FN("strokePreserve", strokePreserve_func, 0, 0),
+    JS_FN("textPath", textPath_func, 1, 0),
+    JS_FN("textExtents", textExtents_func, 1, 0),
+    // transform
+    JS_FN("translate", translate_func, 0, 0),
+    JS_FN("userToDevice", userToDevice_func, 0, 0),
+    JS_FN("userToDeviceDistance", userToDeviceDistance_func, 0, 0),
+    JS_FS_END};
+// clang-format on
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool context_to_gi_argument(JSContext* cx, JS::Value value,
+                                   const char* arg_name,
+                                   GjsArgumentType argument_type,
+                                   GITransfer transfer, GjsArgumentFlags flags,
+                                   GIArgument* arg) {
+    if (value.isNull()) {
+        if (!(flags & GjsArgumentFlags::MAY_BE_NULL)) {
+            gjs_throw(
+                cx, "%s may not be null",
+                gjs_argument_display_name(arg_name, argument_type).c_str());
+            return false;
+        }
+
+        gjs_arg_unset(arg);
+        return true;
+    }
+
+    JS::RootedObject obj{cx, &value.toObject()};
+    cairo_t* cr = CairoContext::for_js(cx, obj);
+    if (!cr)
+        return false;
+    if (transfer == GI_TRANSFER_EVERYTHING)
+        cairo_reference(cr);
+
+    gjs_arg_set(arg, cr);
+    return true;
+}
+
+GJS_JSAPI_RETURN_CONVENTION
+static bool context_from_gi_argument(JSContext* cx,
+                                     JS::MutableHandleValue value_p,
+                                     GIArgument* arg) {
+    JSObject* obj =
+        CairoContext::from_c_ptr(cx, static_cast<cairo_t*>(arg->v_pointer));
+    if (!obj) {
+        gjs_throw(cx, "Could not create Cairo context");
+        return false;
+    }
+
+    value_p.setObject(*obj);
+    return true;
+}
+
+static bool context_release_argument(JSContext*, GITransfer transfer,
+                                     GIArgument* arg) {
+    if (transfer != GI_TRANSFER_NOTHING)
+        cairo_destroy(gjs_arg_get<cairo_t*>(arg));
+    return true;
+}
+
+void gjs_cairo_context_init() {
+    static GjsForeignInfo foreign_info = {context_to_gi_argument,
+                                          context_from_gi_argument,
+                                          context_release_argument};
+
+    gjs_struct_foreign_register("cairo", "Context", &foreign_info);
+}

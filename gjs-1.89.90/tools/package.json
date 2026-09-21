@@ -1,0 +1,19 @@
+{
+  "name": "gjs-development-scripts",
+  "version": "0.0.0",
+  "repository": "https://gitlab.gnome.org/GNOME/gjs",
+  "license": "MIT OR LGPL-2.0-or-later",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "cd .. && eslint .",
+    "fix": "npm run lint --fix",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/jasmine": "^3.10.19",
+    "eslint": "^9.39",
+    "eslint-config-gnome": "git+https://gitlab.gnome.org/World/javascript/eslint-config-gnome.git#c479d059e8d9ea99c3b53c2ea43abf7fdb05eb51",
+    "typescript": "^6.0"
+  }
+}

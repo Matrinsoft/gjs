@@ -1,0 +1,161 @@
+# SPDX-License-Identifier: MIT OR LGPL-2.0-or-later
+# SPDX-FileCopyrightText: 2025 Philip Chimento <philip.chimento@gmail.com>
+
+Checks:
+  - -*
+  - bugprone-argument-comment
+  - bugprone-assert-side-effect
+  - bugprone-branch-clone
+  - bugprone-dangling-handle
+  - bugprone-implicit-widening-of-multiplication-result
+  - bugprone-macro-parentheses
+  - bugprone-macro-repeated-side-effects
+  - bugprone-reserved-identifier
+  - bugprone-sizeof-expression
+  - bugprone-suspicious-string-compare
+  - bugprone-switch-missing-default-case
+  - bugprone-unhandled-self-assignment
+  - bugprone-unused-local-non-trivial-variable
+  - bugprone-use-after-move
+
+  # bugprone checks that we will definitely not deal with:
+  - -bugprone-casting-through-void
+    # Triggers on every GObject cast macro. Unusable unless GObject fixes this.
+  - -bugprone-easily-swappable-parameters  # Too many false positives.
+  - -bugprone-parent-virtual-call
+    # We extensively use chain-ups in arg-cache.cpp in a way that triggers false
+    # positives for this check.
+  - -bugprone-signed-char-misuse
+    # False positive on g_assert_cmp(u)int, and also too many false positives in
+    # marshalling code.
+
+  # To do list for bugprone checks:
+  # - bugprone-assignment-in-if-condition:
+  #   https://github.com/llvm/llvm-project/issues/210638
+  # - bugprone-derived-method-shadowing-base-method - We use the CRTP pattern
+  #   extensively. Since Clang 22 this check produces too many false positives.
+  # - bugprone-multi-level-implicit-pointer-conversion - Many false postives on
+  #   GLib macros (e.g. g_free, g_steal_pointer) but on the other hand it has
+  #   caught several real bugs. GLib might be able to fix this.
+  # - bugprone-narrowing-conversions
+
+  - custom-avoid-char-pointer-return
+  - custom-use-typesafe-array-size
+  - custom-use-typesafe-min
+  - custom-use-typesafe-max
+
+  - modernize-*
+  - -modernize-avoid-c-arrays  # churn; possibly unavoidable in marshalling
+  - -modernize-deprecated-headers  # churn; stylistic; awkward with C/C++ mix
+  - -modernize-use-trailing-return-type  # churn; stylistic
+
+  - performance-*
+  - -performance-no-int-to-ptr  # needed too often for C APIs
+
+  - readability-*
+
+  # readability checks that we will definitely not deal with:
+  - -readability-implicit-bool-conversion
+  - -readability-named-parameter
+    # The above checks enforce styles that we intentionally avoid
+  - -readability-identifier-length
+    # Too many false positives; we use short names when they are obvious and
+    # often repeated, like "cx". Use good judgement instead.
+  - -readability-magic-numbers
+    # Too many false positives; incentivizes constants just for their own sake,
+    # like const int TEN = 10; Use good judgement instead.
+
+  # readability checks that may be enabled in the future:
+  - -readability-braces-around-statements
+    # For now, we intentionally avoid this style; low priority and too much
+    # churn to switch.
+  - -readability-function-cognitive-complexity
+    # It would be a good practice to enable this check locally from time to time
+    # and use it as a suggestion for refactoring, but it's too much churn to
+    # do all at once.
+  - -readability-inconsistent-ifelse-braces
+    # False positives on every use of g_str_has_prefix/suffix. Consider enabling
+    # in C++20 and switch to using string/string_view::starts_with/ends_with.
+    # (COMPAT)
+  - -readability-isolate-declaration
+    # False positives on g_assert_ macros. May consider enabling if it gains a
+    # configuration option to ignore macros.
+  - -readability-math-missing-parentheses
+    # Too many false positives. Parentheses are nice on lesser-used operators
+    # but are not needed for basic PEMDAS. May consider enabling if this is made
+    # configurable.
+CheckOptions:
+  bugprone-assert-side-effect.AssertMacros: "assert,g_assert,g_return_if_fail,\
+    g_return_val_if_fail"
+  bugprone-dangling-handle.HandleClasses: "std::basic_string_view;std::span;\
+    mozilla::Span"
+  bugprone-reserved-identifier.AllowedIdentifiers: _GNU_SOURCE
+  bugprone-suspicious-string-compare.WarnOnLogicalNotComparison: true
+  bugprone-suspicious-string-compare.StringCompareLikeFunctions: "g_strcmp0,\
+    g_ascii_strcasecmp,g_ascii_strncasecmp"
+  bugprone-unused-local-non-trivial-variable.IncludeTypes: .*
+  bugprone-unused-local-non-trivial-variable.ExcludeTypes: "AutoProfilerLabel;\
+    AutoReportException;AutoResetExit;Gjs::AutoInternalRealm;\
+    Gjs::AutoMainRealm;JSAutoRealm;JS::AutoSaveExceptionState;\
+    mozilla::ScopeExit;ToggleQueue::Locked"
+  bugprone-use-after-move.InvalidationFunctions: g_steal_pointer
+  modernize-type-traits.IgnoreMacros: true  # triggers on glib_typeof
+  modernize-use-auto.MinTypeNameLength: 10  # consider shrinking later?
+  modernize-use-emplace.SmartPointers: Gjs::AutoPointer;JS::UniqueChars
+  modernize-use-using.IgnoreExternC: true
+  performance-enum-size.EnumIgnoreList: GjsError;GjsJSError;.*Slot;test_.*
+    # GError enums must be C-compatible; global slots must be uint32_t
+  readability-ambiguous-smartptr-reset-call.SmartPointers: "Gjs::AutoPointer;\
+    JS::PersistentRooted;JS::UniqueChars;mozilla::UniquePtr"
+  readability-simplify-boolean-expr.IgnoreMacros: true  # GLib macros trigger
+  readability-uppercase-literal-suffix.NewSuffixes: L;LL
+    # we only care about confusion between 1 and l
+CustomChecks:
+  - Name: avoid-char-pointer-return
+    Query: |
+      match functionDecl(
+        # hasCanonicalType() includes typedefs of char*
+        returns(hasCanonicalType(pointerType(pointee(asString("char"))))),
+        isDefinition(),  # only bodies, not declarations
+        unless(isExpansionInFileMatching("\.c$")),  # C++ only
+        # currently, too many false positives on templates
+        unless(isTemplateInstantiation())
+      ).bind("func")
+    Diagnostic:
+      - BindName: func
+        Message: >
+          Return const char* or std::string_view instead of char* if the string
+          is borrowed, or Gjs::AutoChar or std::string if it is owned
+  - Name: use-typesafe-array-size
+    Query: |
+      match binaryOperator(
+        hasOperatorName("/"),
+        isExpandedFromMacro("G_N_ELEMENTS"),
+        unless(isExpansionInFileMatching("\.c$"))
+      ).bind("size")
+    Diagnostic:
+      - BindName: size
+        Message: >
+          Prefer std::size() instead of G_N_ELEMENTS macro for type safety
+  - Name: use-typesafe-min
+    Query: |
+      match conditionalOperator(
+        isExpandedFromMacro("MIN"),
+        unless(isExpansionInFileMatching("\.c$"))
+      ).bind("min")
+    Diagnostic:
+      - BindName: min
+        Message: Prefer std::min() instead of MIN macro for type safety
+  - Name: use-typesafe-max
+    Query: |
+      match conditionalOperator(
+        isExpandedFromMacro("MAX"),
+        unless(isExpansionInFileMatching("\.c$"))
+      ).bind("max")
+    Diagnostic:
+      - BindName: max
+        Message: Prefer std::max() instead of MAX macro for type safety
+ExcludeHeaderFilterRegex: /include|/subprojects|config.h
+HeaderFilterRegex: .*
+UseColor: true
+WarningsAsErrors: '*'
